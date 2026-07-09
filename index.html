@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    
+    <title>Lector RSVP</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    
+    <style>
+        body {
+            margin: 0;
+            background-color: #0a0a0a;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        #library-view { display: flex; flex-direction: column; height: 100%; padding: 20px; box-sizing: border-box; overflow-y: auto; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { font-size: 28px; font-weight: 600; margin: 0 0 10px 0; letter-spacing: 1px; }
+        .upload-container { display: flex; justify-content: center; margin-bottom: 40px; }
+        .upload-btn { background-color: #222; border: 2px dashed #555; padding: 20px 40px; border-radius: 12px; cursor: pointer; transition: all 0.2s; text-align: center; }
+        .upload-btn:hover { background-color: #333; border-color: #888; }
+        .upload-btn span { display: block; font-size: 16px; font-weight: bold; }
+        .upload-btn small { color: #888; font-size: 12px; margin-top: 5px; display: block; }
+        input[type="file"] { display: none; }
+        
+        #book-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; padding-bottom: 40px; }
+        .book-card { background-color: #1a1a1a; border-radius: 10px; padding: 20px; cursor: pointer; transition: transform 0.2s, background-color 0.2s; border: 1px solid #333; position: relative; }
+        .book-card:hover { background-color: #252525; transform: translateY(-2px); }
+        .book-title { font-size: 18px; font-weight: 500; margin-bottom: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .book-stats { display: flex; justify-content: space-between; font-size: 12px; color: #aaa; margin-bottom: 8px; }
+        .progress-track { background-color: #333; border-radius: 4px; height: 6px; width: 100%; overflow: hidden; }
+        .progress-fill { background-color: #fff; height: 100%; width: 0%; transition: width 0.3s ease; }
+        .delete-btn { position: absolute; top: 15px; right: 15px; background: none; border: none; color: #666; cursor: pointer; font-size: 18px; }
+        
+        #reader-view { display: none; flex-direction: column; height: 100%; }
+        #reader-controls { background-color: #111; padding: 15px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #333; flex-wrap: wrap; gap: 10px; }
+        .nav-buttons { display: flex; gap: 10px; }
+        .action-btn { background-color: #333; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .slider-container { display: flex; align-items: center; gap: 15px; }
+        
+        #reader-area { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; padding: 20px; }
+        #word-display { font-size: 72px; font-weight: bold; text-align: center; max-width: 90%; word-wrap: break-word; line-height: 1.2; }
+        #live-progress-container { width: 80%; margin-top: 40px; opacity: 0.5; }
+        #live-progress-text { text-align: center; font-size: 14px; margin-bottom: 5px; font-family: monospace; }
+        #loader { display: none; text-align: center; color: #888; margin: 20px 0; }
+    </style>
+</head>
+<body>
+
+    <div id="library-view">
+        <div class="header"><h1>Mi Biblioteca</h1></div>
+        <div class="upload-container">
+            <label class="upload-btn">
+                <input type="file" id="file-input" accept=".txt, .pdf, .epub">
+                <span>+ Agregar un libro nuevo</span>
+                <small>Formatos: TXT, PDF, EPUB</small>
+            </label>
+        </div>
+        <div id="loader">Procesando libro, por favor espera...</div>
+        <div id="book-grid"></div>
+    </div>
+
+    <div id="reader-view">
+        <div id="reader-controls">
+            <div class="nav-buttons">
+                <button class="action-btn" onclick="closeReader()">← Volver</button>
+                <button class="action-btn" onclick="toggleFullscreen()">⛶ Completa</button>
+            </div>
+            <div class="slider-container">
+                <label for="wpm-slider">Velocidad:</label>
+                <input type="range" id="wpm-slider" min="100" max="1000" value="300" step="10">
+                <span id="wpm-value">300 PPM</span>
+            </div>
+        </div>
+
+        <div id="reader-area">
+            <div id="word-display">Mantén presionado para leer</div>
+            <div id="live-progress-container">
+                <div id="live-progress-text">0% (0 / 0)</div>
+                <div class="progress-track"><div class="progress-fill" id="live-progress-bar"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        const DB = {
+            db: null,
+            init() { return new Promise((resolve, reject) => { const req = indexedDB.open("RSVPLibrary", 1); req.onupgradeneeded = e => { e.target.result.createObjectStore("books", { keyPath: "name" }); }; req.onsuccess = e => { this.db = e.target.result; resolve(); }; req.onerror = reject; }); },
+            async save(book) { return new Promise(r => { const tx = this.db.transaction("books", "readwrite"); tx.objectStore("books").put(book); tx.oncomplete = r; }); },
+            async getAll() { return new Promise(r => { const req = this.db.transaction("books").objectStore("books").getAll(); req.onsuccess = () => r(req.result); }); },
+            async get(name) { return new Promise(r => { const req = this.db.transaction("books").objectStore("books").get(name); req.onsuccess = () => r(req.result); }); },
+            async delete(name) { return new Promise(r => { const tx = this.db.transaction("books", "readwrite"); tx.objectStore("books").delete(name); tx.oncomplete = r; }); }
+        };
+
+        let currentBook = null;
+        let readingInterval = null;
+        let wpm = 300;
+
+        const libraryView = document.getElementById('library-view');
+        const readerView = document.getElementById('reader-view');
+        const bookGrid = document.getElementById('book-grid');
+        const loader = document.getElementById('loader');
+        const wordDisplay = document.getElementById('word-display');
+        const liveProgressText = document.getElementById('live-progress-text');
+        const liveProgressBar = document.getElementById('live-progress-bar');
+        const wpmSlider = document.getElementById('wpm-slider');
+        const wpmValue = document.getElementById('wpm-value');
+
+        window.onload = async () => { await DB.init(); renderLibrary(); };
+
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            loader.style.display = 'block';
+            const extension = file.name.split('.').pop().toLowerCase();
+            let text = "";
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                if (extension === 'txt') { text = await file.text(); } 
+                else if (extension === 'pdf') { text = await extractTextFromPDF(arrayBuffer); } 
+                else if (extension === 'epub') { text = await extractTextFromEPUB(arrayBuffer); }
+
+                const words = text.trim().split(/\s+/).filter(w => w.length > 0);
+                await DB.save({ name: file.name, words: words, currentIndex: 0 });
+                loader.style.display = 'none';
+                renderLibrary();
+            } catch (error) { alert("Error al procesar el archivo."); loader.style.display = 'none'; }
+        });
+
+        async function renderLibrary() {
+            const books = await DB.getAll();
+            bookGrid.innerHTML = '';
+            if (books.length === 0) { bookGrid.innerHTML = '<p style="color: #666; text-align: center; grid-column: 1 / -1;">Tu biblioteca está vacía.</p>'; return; }
+            books.forEach(book => {
+                const percentage = book.words.length > 0 ? ((book.currentIndex / book.words.length) * 100).toFixed(1) : 0;
+                const card = document.createElement('div');
+                card.className = 'book-card';
+                card.innerHTML = `<button class="delete-btn" onclick="deleteBook(event, '${book.name}')">×</button><div class="book-title" title="${book.name}">${book.name}</div><div class="book-stats"><span>Progreso: ${percentage}%</span><span>${book.words.length} palabras</span></div><div class="progress-track"><div class="progress-fill" style="width: ${percentage}%"></div></div>`;
+                card.onclick = () => openBook(book.name);
+                bookGrid.appendChild(card);
+            });
+        }
+
+        async function deleteBook(event, name) { event.stopPropagation(); if(confirm('¿Eliminar este libro de tu biblioteca?')) { await DB.delete(name); renderLibrary(); } }
+
+        async function openBook(name) { currentBook = await DB.get(name); libraryView.style.display = 'none'; readerView.style.display = 'flex'; updateReaderUI(); wordDisplay.textContent = currentBook.words[currentBook.currentIndex] || "Fin del libro."; }
+
+        async function closeReader() { stopReading(); if (currentBook) { await DB.save(currentBook); } readerView.style.display = 'none'; libraryView.style.display = 'flex'; renderLibrary(); currentBook = null; }
+
+        function updateReaderUI() { if(!currentBook) return; const percentage = ((currentBook.currentIndex / currentBook.words.length) * 100).toFixed(2); liveProgressText.textContent = `${percentage}% (${currentBook.currentIndex} / ${currentBook.words.length})`; liveProgressBar.style.width = `${percentage}%`; }
+
+        wpmSlider.addEventListener('input', (e) => { wpm = parseInt(e.target.value); wpmValue.textContent = `${wpm} PPM`; if (readingInterval) { stopReading(); startReading(); } });
+
+        function startReading() {
+            if (!currentBook || currentBook.words.length === 0 || readingInterval) return;
+            const delay = 60000 / wpm;
+            readingInterval = setInterval(() => {
+                if (currentBook.currentIndex < currentBook.words.length) {
+                    wordDisplay.textContent = currentBook.words[currentBook.currentIndex];
+                    currentBook.currentIndex++;
+                    if (currentBook.currentIndex % 10 === 0) updateReaderUI();
+                } else { stopReading(); wordDisplay.textContent = "Fin del libro."; updateReaderUI(); }
+            }, delay);
+        }
+
+        function stopReading() { clearInterval(readingInterval); readingInterval = null; if (currentBook) { updateReaderUI(); DB.save(currentBook); } }
+
+        // Pantalla completa por código (Android / Escritorio)
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => console.log(err));
+            } else {
+                if (document.exitFullscreen) { document.exitFullscreen(); }
+            }
+        }
+
+        const area = document.getElementById('reader-area');
+        area.addEventListener('mousedown', startReading);
+        window.addEventListener('mouseup', stopReading);
+        window.addEventListener('mouseleave', stopReading);
+        area.addEventListener('touchstart', (e) => { e.preventDefault(); startReading(); });
+        window.addEventListener('touchend', stopReading);
+        window.addEventListener('touchcancel', stopReading);
+
+        async function extractTextFromPDF(buffer) { const pdf = await pdfjsLib.getDocument({ data: buffer }).promise; let fullText = ""; for (let i = 1; i <= pdf.numPages; i++) { const page = await pdf.getPage(i); const textContent = await page.getTextContent(); fullText += textContent.items.map(item => item.str).join(" ") + " "; } return fullText; }
+        async function extractTextFromEPUB(buffer) { const zip = await JSZip.loadAsync(buffer); let fullText = ""; const fileNames = Object.keys(zip.files).sort(); for (let name of fileNames) { if (name.match(/\.(html|xhtml|htm)$/i)) { const content = await zip.files[name].async("string"); const doc = new DOMParser().parseFromString(content, 'text/html'); fullText += doc.body.textContent + " "; } } return fullText; }
+    </script>
+</body>
+</html>
